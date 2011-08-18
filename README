@@ -1,1 +1,9 @@
-Empty file, at least for now
+xt_pkstat; an iptable module for high frequency packet accounting:
+
+A loadable kernel module that keeps track of number of frames and bytes received per submillisecond time windows.
+Rule management is performed using a shared library, dynamically loaded by iptables.
+Accounting information is exported using procfs.
+
+The project consists of two directories:
+- kernel: loadable kernel module, accounting code
+- iptables: userland shared library to manage accounting rules
