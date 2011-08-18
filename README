@@ -1,4 +1,4 @@
-xt_pkstat; an iptable module for high frequency packet accounting:
+xt_pktstat; an iptable module for high frequency packet accounting:
 
 A loadable kernel module that keeps track of number of frames and bytes received per submillisecond time windows.
 Rule management is performed using a shared library, dynamically loaded by iptables.
