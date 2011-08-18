@@ -1,0 +1,22 @@
+# Compile
+make all
+
+# display help & usage
+XTABLES_LIBDIR=$PWD:/lib/xtables iptables -m pktstat --help
+
+# create 20 buckets with a bucket width of 100msecs (i.e. 2secs)
+XTABLES_LIBDIR=$PWD:/lib/xtables iptables -m pktstat --period 100 --samples 20 -A INPUT
+
+# read the configuration for this rule
+cat /proc/net/xt_pktstat/0/config
+
+# read the data
+cat /proc/net/xt_pktstat/0/data
+
+# timestamp frames bytes
+1313702809400000000 1235 485932
+1313702809500000000 1235 485932
+1313702809600000000 1235 485932
+1313702809700000000 1235 485932
+
+
