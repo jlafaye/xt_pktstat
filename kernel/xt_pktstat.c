@@ -86,6 +86,10 @@ static int pktstat_proc_read_conf(char *page, char **start, off_t offset,
                     info->period); pos += ret;
     ret  = snprintf(page+pos, len-pos, "samples\t\t: %u\n",
                     info->samples); pos += ret;
+
+    // TODO: to retrieve src and dst, we need to retrieve
+    // corresponding xt_entry_target
+
     return pos;
 }
 
@@ -101,19 +105,9 @@ static bool pktstat_mt4_match(const struct sk_buff *skb,
     int throttle = 10;
 #endif
     
-    // check if the current rule applies to the packet
-    const struct iphdr *iph = ip_hdr(skb);
-    if (iph == NULL)
-        return false;
-    // printk(KERN_DEBUG "xt_pktstat: src:%pI4 rule:%pI4/%pI4\n",
-    //        &iph->saddr, &info->src.in, &info->smask.in);
-            
-    if ((iph->saddr & info->smask.ip) != info->src.ip)
-        return false;
-    if ((iph->daddr & info->dmask.ip) != info->dst.ip)
-        return false;
-    
     // get timestamp if no timestamp
+    // TODO: use kernel variable to automatically activate packet timestamping ?
+    // no: because our rule might not apply to all packets
     ts = skb->tstamp;
     if (ts.tv64 == 0) {
         ts = ktime_get_real();
@@ -175,10 +169,8 @@ static int pktstat_mt4_checkentry(const struct xt_mtchk_param* param)
     uint64_t now64;
     char buf[64];
 
-    pr_devel("xt_pktstat: added a rule, period:%llunsecs, samples:%u flags:0x%04x"
-             "%pI4/%pI4->%pI4/%pI4",
-             info->period, info->samples, info->flags,
-             &info->src.in, &info->smask.in, &info->dst.in, &info->dmask.in);
+    pr_devel("xt_pktstat: added a rule, period:%llunsecs, samples:%u flags:0x%04x",
+             info->period, info->samples, info->flags);
 
     // check parameters
     if (!info->period || !info->samples) {

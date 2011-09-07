@@ -15,10 +15,6 @@ struct xt_pktstat_info {
     u_int32_t       flags;
     u_int32_t       samples;
     aligned_u64     period;
-    union nf_inet_addr    src;
-    union nf_inet_addr    smask;
-    union nf_inet_addr    dst;
-    union nf_inet_addr    dmask;
 
     /* Used internally by the kernel */
     struct xt_pktstat_ctx *ctx __attribute__((aligned(8)));
