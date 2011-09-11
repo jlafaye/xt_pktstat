@@ -35,8 +35,6 @@ struct xt_pktstat_ctx {
     spinlock_t                samples_lock;
     u_int32_t                 samples_len;
     DECLARE_KFIFO_PTR(samples, struct xt_pktstat_sample);
-    // struct kfifo_sample_ptr   samples;
-    // struct xt_pktstat_sample* samples;
 
     // /proc export
     struct proc_dir_entry*    proc_dir;
