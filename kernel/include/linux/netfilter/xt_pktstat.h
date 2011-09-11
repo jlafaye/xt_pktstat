@@ -3,8 +3,6 @@
 
 #define PKTSTAT_PERIOD  0x01
 #define PKTSTAT_SAMPLES 0x02
-#define PKTSTAT_IP_SRC  0x04
-#define PKTSTAT_IP_DST  0x08
 
 #include <linux/netfilter.h>
 

@@ -1,13 +1,15 @@
+
+#define DEBUG
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/ip.h>
-#include <linux/netfilter/x_tables.h>
 #include <linux/skbuff.h>
 #include <linux/hrtimer.h>
 #include <linux/proc_fs.h>
 #include <linux/errno.h>
 #include <linux/spinlock.h>
 #include <linux/ktime.h>
+#include <linux/kfifo.h>
 #include <linux/version.h>
 #include <net/net_namespace.h>
 #include <linux/netfilter/x_tables.h>
@@ -18,6 +20,8 @@ struct xt_pktstat_sample {
     u_int32_t   total_count;
     u_int32_t   total_bytes;
 };
+
+// static DECLARE_KFIFO_PTR(kfifo_sample_ptr, struct xt_pktstat_sample);
 
 struct xt_pktstat_ctx {
     ktime_t period;
@@ -30,7 +34,9 @@ struct xt_pktstat_ctx {
     u_int32_t                 curr_sample;
     spinlock_t                samples_lock;
     u_int32_t                 samples_len;
-    struct xt_pktstat_sample* samples;
+    DECLARE_KFIFO_PTR(samples, struct xt_pktstat_sample);
+    // struct kfifo_sample_ptr   samples;
+    // struct xt_pktstat_sample* samples;
 
     // /proc export
     struct proc_dir_entry*    proc_dir;
@@ -41,30 +47,37 @@ struct xt_pktstat_ctx {
 static atomic_t rule_idx = ATOMIC_INIT(-1);
 static struct proc_dir_entry *proc_xt_pktstat;
 
+/* 1 64bits number and 2 32bits numbers */
+/* 20 + 2*10 + 3 chars */
+#define MAX_LINE_SIZE 64
+
 static int pktstat_proc_read(char *page, char **start, off_t offset,
                              int count, int *eof, void* data)
 {
     struct xt_pktstat_ctx* ctx = data;
-    int i = 0;
+    struct xt_pktstat_sample sample;
     int pos = 0;
     int len = count;
-    int ret;
-    int curr_sample = ctx->curr_sample;
+    int quota = ctx->samples_len;
 
-    spin_lock_bh(&ctx->samples_lock);
-    while (len > 0 && i < ctx->samples_len) {
+    while (len>MAX_LINE_SIZE && quota--) {
+        int ret;
+        unsigned int res = kfifo_out(&ctx->samples, &sample, 1);
+        // no more data
+        if (res == 0)
+            break; 
+        // unable to pop
+        if (res < 1) {
+            printk(KERN_DEBUG "xt_pktstat[%d]: unable to pop item: %u\n", ctx->rule_idx, res);
+            return pos; 
+        }
         ret = snprintf(page+pos, len, "%llu %u %u\n",
-                       (unsigned long long)ctx->samples[curr_sample].tstamp.tv64,
-                       ctx->samples[curr_sample].total_count, 
-                       ctx->samples[curr_sample].total_bytes);
-        ++curr_sample;
-        if (curr_sample >= ctx->samples_len)
-            curr_sample = 0;
+                      (unsigned long long)sample.tstamp.tv64,
+                      sample.total_count, 
+                      sample.total_bytes);
         pos += ret;
         len -= ret;
-        ++i;
     }
-    spin_unlock_bh(&ctx->samples_lock);
 
     return pos;
 }
@@ -77,11 +90,6 @@ static int pktstat_proc_read_conf(char *page, char **start, off_t offset,
     int pos = 0;
     int len = count;
     int ret;
-   
-    ret  = snprintf(page+pos, len-pos, "ipsrc\t\t: %pI4/%pI4\n",
-                    &info->src.in, &info->smask.in); pos += ret;
-    ret  = snprintf(page+pos, len-pos, "ipdst\t\t: %pI4/%pI4\n",
-                    &info->dst.in, &info->dmask.in); pos += ret;
     ret  = snprintf(page+pos, len-pos, "period\t\t: %llu\n",
                     info->period); pos += ret;
     ret  = snprintf(page+pos, len-pos, "samples\t\t: %u\n",
@@ -97,11 +105,14 @@ static int pktstat_proc_read_conf(char *page, char **start, off_t offset,
 static bool pktstat_mt4_match(const struct sk_buff *skb, 
                               struct xt_action_param *param)
 {
+    unsigned int ret;
     ktime_t ts;
     const struct xt_pktstat_info *info = param->matchinfo;
     struct xt_pktstat_ctx* ctx = info->ctx;
+    struct xt_pktstat_sample sample;
     
 #ifdef DEBUG
+    int attempts = 0;
     int throttle = 10;
 #endif
     
@@ -137,17 +148,16 @@ static bool pktstat_mt4_match(const struct sk_buff *skb,
         */
 
         // backup statistics
-        spin_lock_bh(&ctx->samples_lock);
-        ctx->samples[ctx->curr_sample].tstamp.tv64 = curr.tv64;
-        ctx->samples[ctx->curr_sample].total_count = ctx->total_count;
-        ctx->samples[ctx->curr_sample].total_bytes = ctx->total_bytes;
+        sample.tstamp.tv64 = curr.tv64;
+        sample.total_count = ctx->total_count;
+        sample.total_bytes = ctx->total_bytes;
 
-        // change sample
-        ++ctx->curr_sample;
-        if (ctx->curr_sample >= info->samples) {
-            ctx->curr_sample = 0;
+        // push sample in the fifo  
+        ret = kfifo_put(&ctx->samples, &sample);
+        if (ret < 1) {
+            pr_devel("xt_pktstat[%d] unable to put sample onto the fifo: %u\n",
+                     ctx->rule_idx, ret);
         }
-        spin_unlock_bh(&ctx->samples_lock);
 
         ctx->next = ktime_add(ctx->next, ctx->period);
     }
@@ -155,6 +165,8 @@ static bool pktstat_mt4_match(const struct sk_buff *skb,
     // update statistics
     ctx->total_count += 1;
     ctx->total_bytes += skb->len;
+    pr_devel("xt_pktstat[%d] total_count:%d total_bytes:%d\n", 
+             ctx->rule_idx, ctx->total_count, ctx->total_bytes);
 
     return true; 
 }
@@ -163,7 +175,7 @@ static int pktstat_mt4_checkentry(const struct xt_mtchk_param* param)
 {
 
     ktime_t now;
-    int i;
+    // int i;
     struct xt_pktstat_info *info = param->matchinfo;
     struct xt_pktstat_ctx  *ctx  = 0;
     uint64_t now64;
@@ -210,20 +222,14 @@ static int pktstat_mt4_checkentry(const struct xt_mtchk_param* param)
     ctx->proc_entry_conf->data      = info;
 
     // allocate and initialize counters
-    pr_devel("xt_pktstat: allocating %u bytes\n",
-             info->samples*sizeof(struct xt_pktstat_sample));     
-    ctx->samples = kmalloc(sizeof(struct xt_pktstat_sample)*info->samples, GFP_KERNEL);
-    if (ctx->samples == NULL) 
+
+    if (kfifo_alloc(&ctx->samples, info->samples, GFP_KERNEL))
         goto error;
+
     ctx->total_count = 0;
     ctx->total_bytes = 0;
     ctx->curr_sample = 0;
     ctx->samples_len = info->samples;
-    for (i=0; i<ctx->samples_len; ++i) {
-        ctx->samples[i].tstamp.tv64 = 0;
-        ctx->samples[i].total_count = 0;
-        ctx->samples[i].total_bytes = 0;
-    }
 
     // round now to the closest inferior period multiple
     ctx->period.tv64 = info->period;
@@ -256,7 +262,8 @@ static int pktstat_mt4_checkentry(const struct xt_mtchk_param* param)
             snprintf(buf, sizeof(buf), "%d", ctx->rule_idx);
             remove_proc_entry(buf, proc_xt_pktstat);
         }
-        kfree(ctx->samples);
+        kfifo_free(&ctx->samples);
+        // kfree(ctx->samples);
     }
     kfree(info->ctx);
     return -ENOMEM;
@@ -303,7 +310,7 @@ static int __init init(void)
         return ENOENT;
     }
 
-    printk(KERN_INFO "xt_pktstat: init!\n");
+    printk(KERN_INFO "xt_pktstat: init! size:%d\n", sizeof(struct xt_pktstat_info));
     return xt_register_match(&pktstat_mt4_reg); 
 }
 

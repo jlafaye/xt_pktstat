@@ -1,10 +1,10 @@
-CFLAGS=-O2 -Wall -I../kernel/include
+CFLAGS=-O2 -Wall -I../kernel/include # -I/home/jlafaye/opt/include
 
 lib%.so: lib%.o
-	gcc -shared -o $@ $^;
+	gcc  -shared -fpic -o $@ $^;
 
 lib%.o: lib%.c
-	gcc ${CFLAGS} -D_INIT=lib$*_init -c -o $@ $<;
+	gcc ${CFLAGS} -DPIC -fPIC -D_INIT=lib$*_init -c -o $@ $<;
 
 all: libxt_pktstat.so
 

@@ -20,10 +20,11 @@ static void pktstat_mt_help(void)
          );
 }
 
-static struct option pktstat_mt_opts[] = {
-    { .name = "period",  .has_arg = 1, .flag = 0, .val = '1' }, 
-    { .name = "samples", .has_arg = 1, .flag = 0, .val = '2' },
-    { .name = 0 }
+
+static const struct option pktstat_mt_opts[] = {
+    { .name = "samples", .has_arg = true, .val = 's' },
+    { .name = "period",  .has_arg = true, .val = 'p' },
+    { .name = NULL }
 };
 
 static void pktstat_mt_init(struct xt_entry_match *match)
@@ -38,24 +39,28 @@ static void pktstat_mt_init(struct xt_entry_match *match)
 static int pktstat_mt4_parse(int c, char **argv, int invert, unsigned int *flags,
                              const void *entry, struct xt_entry_match **match)
 {
+    printf("+++ pktstat_mt4_parse(c=%c,optarg=%s, argv=, value=)\n", c, optarg);
+     //       c, optind, argv[optind], argv[optind+1]);
     struct xt_pktstat_info* info = (struct xt_pktstat_info*)(*match)->data;
 
     switch (c) {
         /* --period */
-        case '1':
-            info->period  = (uint64_t)atol(argv[optind-1]) * 1000000L;
+        case 'p':
+            //xtables_param_act(XTF_ONLY_ONCE, "pktstat", "--period", *flags & PKTSTAT_PERIOD);
+            info->period  = (uint64_t)atol(optarg) * 1000000L;
             *flags  |= PKTSTAT_PERIOD;
             break;
         /* --samples */
-        case '2':
-            info->samples = atoi(argv[optind-1]);
+        case 's':
+            //info->samples = atoi(argv[optind+1]);
+            info->samples = atoi(optarg);
             *flags  |= PKTSTAT_SAMPLES;
             break;
         default:
-            return 0;
+            return false;
     }
 
-    return 1;
+    return true;
 }
 
 static void pktstat_mt_check(unsigned int flags)
@@ -118,7 +123,7 @@ static struct xtables_match pktstat_mt4_reg
     .extra_opts      = pktstat_mt_opts
 };
 
-void _init(void)
+static void _init(void)
 {
     xtables_register_match(&pktstat_mt4_reg);
 }
