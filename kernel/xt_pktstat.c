@@ -10,6 +10,7 @@
 #include <linux/spinlock.h>
 #include <linux/ktime.h>
 #include <linux/kfifo.h>
+#include <linux/seq_file.h>
 #include <linux/version.h>
 #include <net/net_namespace.h>
 #include <linux/netfilter/x_tables.h>
@@ -21,7 +22,9 @@ struct xt_pktstat_sample {
     u_int32_t   total_bytes;
 };
 
-// static DECLARE_KFIFO_PTR(kfifo_sample_ptr, struct xt_pktstat_sample);
+struct iterator {
+    u_int32_t   credit;
+};
 
 struct xt_pktstat_ctx {
     ktime_t period;
@@ -49,36 +52,99 @@ static struct proc_dir_entry *proc_xt_pktstat;
 /* 20 + 2*10 + 3 chars */
 #define MAX_LINE_SIZE 64
 
-static int pktstat_proc_read(char *page, char **start, off_t offset,
-                             int count, int *eof, void* data)
+// seq file for /proc
+static void* pktstat_proc_seq_start(struct seq_file* s, loff_t* pos)
 {
-    struct xt_pktstat_ctx* ctx = data;
-    struct xt_pktstat_sample sample;
-    int pos = 0;
-    int len = count;
-    int quota = ctx->samples_len;
+    struct xt_pktstat_ctx* ctx = s->private;
 
-    while (len>MAX_LINE_SIZE && quota--) {
-        int ret;
-        unsigned int res = kfifo_out(&ctx->samples, &sample, 1);
-        // no more data
-        if (res == 0)
-            break; 
-        // unable to pop
-        if (res < 1) {
-            printk(KERN_DEBUG "xt_pktstat[%d]: unable to pop item: %u\n", ctx->rule_idx, res);
-            return pos; 
-        }
-        ret = snprintf(page+pos, len, "%llu %u %u\n",
-                      (unsigned long long)sample.tstamp.tv64,
-                      sample.total_count, 
-                      sample.total_bytes);
-        pos += ret;
-        len -= ret;
-    }
+    pr_devel("xt_pktstat[%02d]: proc/start: pos=%d\n", ctx->rule_idx, (int)*pos);
+
+    if (*pos >= ctx->samples_len)
+        return NULL;
 
     return pos;
 }
+
+static void* pktstat_proc_seq_next(struct seq_file* s, void* v, loff_t* pos)
+{
+    struct xt_pktstat_ctx* ctx = s->private;
+
+    pr_devel("xt_pktstat[%02d]: proc/next: pos=%d\n", ctx->rule_idx, (int)*pos);
+
+    // we've exhausted our quota
+    if (*pos >= ctx->samples_len)
+        return NULL;
+
+    ++(*pos);
+
+    return pos;
+}
+
+static void pktstat_proc_seq_stop(struct seq_file* s, void* v)
+{
+    pr_devel("xt_pktstat: proc/stop\n");
+}
+
+static int pktstat_proc_seq_show(struct seq_file* s, void* v)
+{
+    struct xt_pktstat_ctx* ctx = s->private;
+    struct xt_pktstat_sample sample;
+    unsigned int res;
+    
+    pr_devel("xt_pktstat[%d]: proc/show pos\n",
+             ctx->rule_idx);
+
+    // pop a statistics sample, if available
+    res = kfifo_out(&ctx->samples, &sample, 1);
+
+    // empty fifo, stop iteration
+    if (!res) {
+        return 0;
+    }
+
+    // write single line
+    seq_printf(s, "%llu %u %u\n",
+              (unsigned long long)sample.tstamp.tv64,
+              sample.total_count, 
+              sample.total_bytes);
+    return 0;
+}
+
+static struct seq_operations pktstat_proc_seq_ops = {
+    .start = pktstat_proc_seq_start,
+    .next  = pktstat_proc_seq_next,
+    .stop  = pktstat_proc_seq_stop,
+    .show  = pktstat_proc_seq_show
+};
+
+static int pktstat_proc_seq_open(struct inode* inode, struct file* file)
+{
+    struct seq_file* s; 
+    int res = seq_open(file, &pktstat_proc_seq_ops);
+    printk(KERN_DEBUG "xt_pktstat: proc/open: seq_open)\n");
+    if (res) 
+        return res;
+
+    // file->private_data was initialized by seq_open
+    s = (struct seq_file*)file->private_data;
+
+    if (s->private) {
+        printk(KERN_ERR "xt_pktstat: proc/open: invalid initialization\n");
+        return -EINVAL;
+    }
+
+    // use context as private data
+    s->private = PROC_I(inode)->pde->data;
+    return res;
+}
+
+static struct file_operations pktstat_proc_file_ops = {
+    .owner   = THIS_MODULE,
+    .open    = pktstat_proc_seq_open,
+    .read    = seq_read,
+    .llseek  = seq_lseek,
+    .release = seq_release
+};
 
 static int pktstat_proc_read_conf(char *page, char **start, off_t offset,
                                   int count, int* eof, void* data)
@@ -109,14 +175,7 @@ static bool pktstat_mt4_match(const struct sk_buff *skb,
     struct xt_pktstat_ctx* ctx = info->ctx;
     struct xt_pktstat_sample sample;
     
-#ifdef DEBUG
-    int attempts = 0;
-    int throttle = 10;
-#endif
-    
     // get timestamp if no timestamp
-    // TODO: use kernel variable to automatically activate packet timestamping ?
-    // no: because our rule might not apply to all packets
     ts = skb->tstamp;
     if (ts.tv64 == 0) {
         ts = ktime_get_real();
@@ -126,27 +185,18 @@ static bool pktstat_mt4_match(const struct sk_buff *skb,
              ctx->rule_idx, skb, info, 
              ctx->next.tv64, &ctx->next, ctx->period.tv64); 
 
-    while (ctx->next.tv64 < ts.tv64) {
-        ktime_t curr = ctx->next;
+    // if period has changed, we need to push statistics
+    if (ctx->next.tv64 < ts.tv64) {
+        ktime_t prevnext = ctx->next;
 
-#ifdef DEBUG
-        --throttle;
-        if (throttle == 0) {
-            pr_devel("xt_pktstat[%d] weird clock\n",
-                    ctx->rule_idx);
-            pr_devel("xt_pktstat[%d] next:%llu\n", ctx->rule_idx, ctx->next.tv64);
-            pr_devel("xt_pktstat[%d]   ts:%llu\n", ctx->rule_idx, ts.tv64);
-            return true;
+        // adjust next logging timestamp
+        while (ctx->next.tv64 < ts.tv64) {
+            prevnext  = ctx->next;
+            ctx->next = ktime_add(ctx->next, ctx->period);
         }
-#endif
 
-        /*
-        printk(KERN_DEBUG "xt_pktstat: ts: %llu total_count:%u total_bytes:%u\n",
-               (unsigned long long)ctx->next.tv64, ctx->total_count, ctx->total_bytes);
-        */
-
-        // backup statistics
-        sample.tstamp.tv64 = curr.tv64;
+        // build sample
+        sample.tstamp.tv64 = prevnext.tv64;
         sample.total_count = ctx->total_count;
         sample.total_bytes = ctx->total_bytes;
 
@@ -155,9 +205,13 @@ static bool pktstat_mt4_match(const struct sk_buff *skb,
         if (ret < 1) {
             pr_devel("xt_pktstat[%d] unable to put sample onto the fifo: %u\n",
                      ctx->rule_idx, ret);
+        } 
+#ifdef DEBUG
+        else {
+            pr_devel("xt_pkstat[%d] %d samples put into the fifo",
+                     ctx->rule_idx, ret);
         }
-
-        ctx->next = ktime_add(ctx->next, ctx->period);
+#endif
     }
 
     // update statistics
@@ -208,8 +262,9 @@ static int pktstat_mt4_checkentry(const struct xt_mtchk_param* param)
         create_proc_entry("data", S_IRUGO | S_IWUSR, ctx->proc_dir);
     if (ctx->proc_entry_data == NULL)
         goto error;
-    ctx->proc_entry_data->read_proc = pktstat_proc_read;
+    // data read handled by seq_file API
     ctx->proc_entry_data->data      = ctx;
+    ctx->proc_entry_data->proc_fops = &pktstat_proc_file_ops;
     
     // ... conf
     ctx->proc_entry_conf = 
@@ -220,7 +275,6 @@ static int pktstat_mt4_checkentry(const struct xt_mtchk_param* param)
     ctx->proc_entry_conf->data      = info;
 
     // allocate and initialize counters
-
     if (kfifo_alloc(&ctx->samples, info->samples, GFP_KERNEL))
         goto error;
 
@@ -261,7 +315,6 @@ static int pktstat_mt4_checkentry(const struct xt_mtchk_param* param)
             remove_proc_entry(buf, proc_xt_pktstat);
         }
         kfifo_free(&ctx->samples);
-        // kfree(ctx->samples);
     }
     kfree(info->ctx);
     return -ENOMEM;

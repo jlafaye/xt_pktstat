@@ -123,7 +123,7 @@ static struct xtables_match pktstat_mt4_reg
     .extra_opts      = pktstat_mt_opts
 };
 
-static void _init(void)
+void _init(void)
 {
     xtables_register_match(&pktstat_mt4_reg);
 }
