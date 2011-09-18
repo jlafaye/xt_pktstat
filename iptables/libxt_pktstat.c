@@ -39,14 +39,11 @@ static void pktstat_mt_init(struct xt_entry_match *match)
 static int pktstat_mt4_parse(int c, char **argv, int invert, unsigned int *flags,
                              const void *entry, struct xt_entry_match **match)
 {
-    printf("+++ pktstat_mt4_parse(c=%c,optarg=%s, argv=, value=)\n", c, optarg);
-     //       c, optind, argv[optind], argv[optind+1]);
     struct xt_pktstat_info* info = (struct xt_pktstat_info*)(*match)->data;
 
     switch (c) {
         /* --period */
         case 'p':
-            //xtables_param_act(XTF_ONLY_ONCE, "pktstat", "--period", *flags & PKTSTAT_PERIOD);
             info->period  = (uint64_t)atol(optarg) * 1000000L;
             *flags  |= PKTSTAT_PERIOD;
             break;
