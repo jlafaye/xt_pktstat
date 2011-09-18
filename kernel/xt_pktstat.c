@@ -1,5 +1,4 @@
 
-// #define DEBUG
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/ip.h>
@@ -121,7 +120,7 @@ static int pktstat_proc_seq_open(struct inode* inode, struct file* file)
 {
     struct seq_file* s; 
     int res = seq_open(file, &pktstat_proc_seq_ops);
-    printk(KERN_DEBUG "xt_pktstat: proc/open: seq_open)\n");
+    pr_devel("xt_pktstat: proc/open: seq_open)\n");
     if (res) 
         return res;
 
@@ -129,7 +128,7 @@ static int pktstat_proc_seq_open(struct inode* inode, struct file* file)
     s = (struct seq_file*)file->private_data;
 
     if (s->private) {
-        printk(KERN_ERR "xt_pktstat: proc/open: invalid initialization\n");
+        printk(KERN_DEBUG "xt_pktstat: proc/open: invalid initialization\n");
         return -EINVAL;
     }
 
@@ -201,12 +200,12 @@ static bool pktstat_mt4_match(const struct sk_buff *skb,
         sample.total_bytes = ctx->total_bytes;
 
         // push sample in the fifo  
-        ret = kfifo_put(&ctx->samples, &sample);
+        ret = fifo_put(&ctx->samples, &sample);
+#ifdef DEBUG
         if (ret < 1) {
             pr_devel("xt_pktstat[%d] unable to put sample onto the fifo: %u\n",
                      ctx->rule_idx, ret);
         } 
-#ifdef DEBUG
         else {
             pr_devel("xt_pkstat[%d] %d samples put into the fifo",
                      ctx->rule_idx, ret);
