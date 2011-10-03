@@ -200,7 +200,7 @@ static bool pktstat_mt4_match(const struct sk_buff *skb,
         sample.total_bytes = ctx->total_bytes;
 
         // push sample in the fifo  
-        ret = fifo_put(&ctx->samples, &sample);
+        ret = kfifo_put(&ctx->samples, &sample);
 #ifdef DEBUG
         if (ret < 1) {
             pr_devel("xt_pktstat[%d] unable to put sample onto the fifo: %u\n",
