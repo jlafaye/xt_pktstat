@@ -12,7 +12,7 @@ And is divided into the following directories:
 * kernel: loadable kernel module, accounting code
 * iptables: userland shared library to manage accounting rules
 
-Internally, xt_pkstat uses a FIFO filled in a netfilter hook and emptied when reading pseudo-file in /proc. It is up to the user program to ensure that the pseudo-file is regulary read to prevent statistics from accumulating in the FIFO. In case of a full FIFO, network stack will not be able to push new statistics samples onto the FIFO. Consistency of the statistics will be kepts but accuracy will be lost.
+Internally, xt_pkstat uses a FIFO filled in a netfilter hook and emptied when reading pseudo-file in /proc. It is up to the user program to ensure that the pseudo-file is regulary read to prevent statistics from accumulating in the FIFO. In case of a full FIFO, network stack will not be able to push new statistics samples onto the FIFO. Consistency of the statistics will be kept but accuracy will be lost.
 
 Compilation of kernel module
 ----------------------------
@@ -87,3 +87,7 @@ cat /proc/net/xt_pktstat/0/data
 1313702809700000000 1235 485932
 ```
 
+Sample graphical output
+-----------------------
+
+TODO
