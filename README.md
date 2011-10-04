@@ -1,12 +1,15 @@
-xt_pktstat; an iptable module for high frequency packet accounting:
+xt_pktstat; an iptable module for high frequency packet accounting
+------------------------------------------------------------------
 
 A loadable kernel module that keeps track of number of frames and bytes received per submillisecond time windows.
 An iptables shared library to add/configure/remove rules
 A /proc subdirectory to easily use statistics in user programs
 
-The project consists of two directories:
-- kernel: loadable kernel module, accounting code
-- iptables: userland shared library to manage accounting rules
+The project several components:
+  * kernel: loadable kernel module, accounting code
+  * iptables: userland shared library to manage accounting rules
+
+Internally, xt_pkstat uses a FIFO filled in a netfilter hook and emptied when reading pseudo-file in /proc. It is up to the user program to ensure that the pseudo-file is regulary read to prevent statistics from accumulating in the FIFO. In case of a full FIFO, network stack will not be able to push new statistics samples onto the FIFO. Consistency of the statistics will be kepts but accuracy will be lost.
 
 Compilation of kernel module
 ----------------------------
@@ -56,10 +59,12 @@ Create a basic rule, with e.g. the following parameters
 Read the data
 
 > cat /proc/net/xt_pktstat/0/data
-
+ 
+```
 # timestamp frames bytes
 1313702809400000000 1235 485932
 1313702809500000000 1235 485932
 1313702809600000000 1235 485932
 1313702809700000000 1235 485932
+```
 
