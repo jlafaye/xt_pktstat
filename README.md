@@ -27,8 +27,9 @@ Compilation of userland shared library
 --------------------------------------
 
 > cd iptables
+> make all
 
-TODO
+Iptables development package must be installed for the library to compile. In case headers are not installed in a standard location, CFLAFS can be changed in the Makefile
 
 Creating a filter and examining data
 ------------------------------------
@@ -42,7 +43,23 @@ Successful loading of the module can be checked in kernel log file, usually /var
 > grep xt_pktstat /var/log/messages
 > [29246.414327] xt_pktstat: init! size:24
 
-Create a basic rule, e.g. 
+Display help and usage for the pktstat module, iptables command must be prefixed with the location of the libxt_pktstat.so shared library.
 
-TODO
+> XTABLES_LIBDIR=$PWD:/lib/xtables iptables -m pktstat --help
+
+Create a basic rule, with e.g. the following parameters
+  * `period`: width of a time bucket, here 100ms
+  * `samples`: max number of samples allowed in the fifo, here 20
+
+> XTABLES_LIBDIR=$PWD:/lib/xtables iptables -m pktstat --period 100 --samples 20 -A INPUT
+
+Read the data
+
+> cat /proc/net/xt_pktstat/0/data
+
+# timestamp frames bytes
+1313702809400000000 1235 485932
+1313702809500000000 1235 485932
+1313702809600000000 1235 485932
+1313702809700000000 1235 485932
 
