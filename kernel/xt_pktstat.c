@@ -1,4 +1,11 @@
-
+/*
+ * xt_pktstat - high frequency packet accounting
+ * by Julien Lafaye <jlafaye@gmail.com>, 2011
+ *
+ *	This program is free software; you can redistribute it and/or modify
+ *	it under the terms of the GNU General Public License; either
+ *	version 2 of the License, as published by the Free Software Foundation.
+ */
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/ip.h>
@@ -45,7 +52,7 @@ struct xt_pktstat_ctx {
 };
 
 static atomic_t rule_idx = ATOMIC_INIT(-1);
-static struct proc_dir_entry *proc_xt_pktstat;
+static struct proc_dir_entry* proc_xt_pktstat;
 
 /* 1 64bits number and 2 32bits numbers */
 /* 20 + 2*10 + 3 chars */
@@ -165,12 +172,12 @@ static int pktstat_proc_read_conf(char *page, char **start, off_t offset,
 }
 
 
-static bool pktstat_mt4_match(const struct sk_buff *skb, 
-                              struct xt_action_param *param)
+static bool pktstat_mt4_match(const struct sk_buff*         skb, 
+                                    struct xt_action_param* param)
 {
     unsigned int ret;
     ktime_t ts;
-    const struct xt_pktstat_info *info = param->matchinfo;
+    const struct xt_pktstat_info* info = param->matchinfo;
     struct xt_pktstat_ctx* ctx = info->ctx;
     struct xt_pktstat_sample sample;
     
@@ -227,8 +234,8 @@ static int pktstat_mt4_checkentry(const struct xt_mtchk_param* param)
 
     ktime_t now;
     // int i;
-    struct xt_pktstat_info *info = param->matchinfo;
-    struct xt_pktstat_ctx  *ctx  = 0;
+    struct xt_pktstat_info* info = param->matchinfo;
+    struct xt_pktstat_ctx * ctx  = 0;
     uint64_t now64;
     char buf[64];
 

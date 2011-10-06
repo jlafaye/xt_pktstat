@@ -15,7 +15,7 @@ struct xt_pktstat_info {
     aligned_u64     period;
 
     /* Used internally by the kernel */
-    struct xt_pktstat_ctx *ctx __attribute__((aligned(8)));
+    struct xt_pktstat_ctx* ctx __attribute__((aligned(8)));
 };
 
 
