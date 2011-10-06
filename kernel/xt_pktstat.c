@@ -33,6 +33,9 @@ struct iterator {
 };
 
 struct xt_pktstat_ctx {
+    struct  list_head list;
+    atomic_t ref;
+
     ktime_t period;
     ktime_t next;
     int     rule_idx;
@@ -41,9 +44,11 @@ struct xt_pktstat_ctx {
     u_int32_t                 total_count;
     u_int32_t                 total_bytes; 
     u_int32_t                 curr_sample;
-    spinlock_t                samples_lock;
+    // spinlock_t                samples_lock;
     u_int32_t                 samples_len;
     DECLARE_KFIFO_PTR(samples, struct xt_pktstat_sample);
+
+    char name[sizeof(((struct xt_pktstat_info*)NULL)->name)];
 
     // /proc export
     struct proc_dir_entry*    proc_dir;
@@ -51,7 +56,10 @@ struct xt_pktstat_ctx {
     struct proc_dir_entry*    proc_entry_conf;
 };
 
-static atomic_t rule_idx = ATOMIC_INIT(-1);
+static LIST_HEAD(xt_pktstat_ctx_list);
+static DEFINE_SPINLOCK(xt_pktstat_ctx_list_lock);
+
+// static atomic_t rule_idx = ATOMIC_INIT(-1);
 static struct proc_dir_entry* proc_xt_pktstat;
 
 /* 1 64bits number and 2 32bits numbers */
@@ -139,7 +147,7 @@ static int pktstat_proc_seq_open(struct inode* inode, struct file* file)
         return -EINVAL;
     }
 
-    // use context as private data
+    // use xt_pktstat_ctx as private data
     s->private = PROC_I(inode)->pde->data;
     return res;
 }
@@ -229,37 +237,23 @@ static bool pktstat_mt4_match(const struct sk_buff*         skb,
     return true; 
 }
 
-static int pktstat_mt4_checkentry(const struct xt_mtchk_param* param)
+static struct xt_pktstat_ctx *
+pktstat_create_xt_pktstat_ctx(const struct xt_pktstat_info* info)
 {
-
+    struct xt_pktstat_ctx *ctx;
     ktime_t now;
-    // int i;
-    struct xt_pktstat_info* info = param->matchinfo;
-    struct xt_pktstat_ctx * ctx  = 0;
     uint64_t now64;
-    char buf[64];
 
-    pr_devel("xt_pktstat: added a rule, period:%llunsecs, samples:%u flags:0x%04x",
-             info->period, info->samples, info->flags);
-
-    // check parameters
-    if (!info->period || !info->samples) {
-        printk(KERN_ERR "xt_pkstat: invalid parameters\n");
-        return -EINVAL;
-    }
-
-    // allocate and initialize context
-    pr_devel(KERN_DEBUG "xt_pkstat: allocating a context of size %d\n", sizeof(*info->ctx));
+    // allocate and initialize xt_pktstat_ctx
+    pr_devel(KERN_DEBUG "xt_pkstat: allocating a xt_pktstat_ctx of size %d\n", sizeof(*info->ctx));
     ctx = kmalloc(sizeof(*info->ctx), GFP_KERNEL);
     if (ctx == NULL)
-        goto error;
-    ctx->rule_idx = atomic_add_return(1, &rule_idx);
-    spin_lock_init(&ctx->samples_lock);
-    info->ctx = ctx;
+        return NULL;
 
     // create procfs directory & entries
-    snprintf(buf, 64, "%d", ctx->rule_idx);
-    ctx->proc_dir = proc_mkdir(buf, proc_xt_pktstat);
+    atomic_set(&ctx->ref, 1);
+    strcpy(ctx->name, info->name);
+    ctx->proc_dir = proc_mkdir(ctx->name, proc_xt_pktstat);
     if (ctx->proc_dir == NULL)
         goto error;
 
@@ -268,13 +262,14 @@ static int pktstat_mt4_checkentry(const struct xt_mtchk_param* param)
         create_proc_entry("data", S_IRUGO | S_IWUSR, ctx->proc_dir);
     if (ctx->proc_entry_data == NULL)
         goto error;
+
     // data read handled by seq_file API
     ctx->proc_entry_data->data      = ctx;
     ctx->proc_entry_data->proc_fops = &pktstat_proc_file_ops;
-    
+
     // ... conf
     ctx->proc_entry_conf = 
-        create_proc_entry("config", S_IRUGO | S_IWUSR, ctx->proc_dir);
+            create_proc_entry("config", S_IRUGO | S_IWUSR, ctx->proc_dir);
     if (ctx->proc_entry_conf == NULL) 
         goto error;
     ctx->proc_entry_conf->read_proc = pktstat_proc_read_conf;
@@ -295,44 +290,113 @@ static int pktstat_mt4_checkentry(const struct xt_mtchk_param* param)
     // printk(KERN_DEBUG "xt_pktstat[%d]:  now: %llup\n", ctx->rule_idx, now.tv64);
     now64    = (uint64_t)now.tv64;
     do_div(now64, info->period);
-    now64 = (now64)*info->period;
+    now64    = (now64)*info->period;
     now.tv64 = now64;
 
     // schedule next stat rotation
     ctx->next = ktime_add(now, ctx->period);
-    /*
-    printk(KERN_DEBUG "xt_pktstat[%d]: next: %llu@%p\n", 
+        /*
+           printk(KERN_DEBUG "xt_pktstat[%d]: next: %llu@%p\n", 
            ctx->rule_idx, ctx->next.tv64, &ctx->next);*/
 
-    // pktstat_dbg = (unsigned long long*)&ctx->next;
-    // DEBUG_TS;
+        // pktstat_dbg = (unsigned long long*)&ctx->next;
+        // DEBUG_TS;
     printk(KERN_INFO "xt_pktstat[%02d]: added a rule, "
-                     "period:%llunsecs, samples:%u flags:0x%04x\n", 
-                     ctx->rule_idx, info->period, info->samples, info->flags);
-    
-    return 0;
+                    "period:%llunsecs, samples:%u flags:0x%04x\n", 
+                    ctx->rule_idx, info->period, info->samples, info->flags);
+    return ctx;
 
   error:
     if (ctx) {
         if (ctx->proc_dir) {
-            remove_proc_entry("data",   ctx->proc_dir);
-            remove_proc_entry("config", ctx->proc_dir);
-            snprintf(buf, sizeof(buf), "%d", ctx->rule_idx);
-            remove_proc_entry(buf, proc_xt_pktstat);
+            remove_proc_entry("data",    ctx->proc_dir);
+            remove_proc_entry("config",  ctx->proc_dir);
+            remove_proc_entry(ctx->name, proc_xt_pktstat);
         }
         kfifo_free(&ctx->samples);
     }
-    kfree(info->ctx);
-    return -ENOMEM;
+    kfree(ctx);
+    return NULL; 
+}
+
+static struct xt_pktstat_ctx *
+pktstat_get_xt_pktstat_ctx(const struct xt_pktstat_info* info)
+{
+    struct xt_pktstat_ctx *ctx;
+
+    spin_lock_bh(&xt_pktstat_ctx_list_lock);
+    list_for_each_entry(ctx, &xt_pktstat_ctx_list, list)
+        if (strcmp(ctx->name, info->name) == 0) {
+            atomic_inc(&ctx->ref);
+            spin_unlock_bh(&xt_pktstat_ctx_list_lock);
+            return ctx;
+        }
+
+    ctx = pktstat_create_xt_pktstat_ctx(info);
+    if (ctx == NULL)
+        goto error;
+
+    list_add_tail(&ctx->list, &xt_pktstat_ctx_list);
+    spin_unlock_bh(&xt_pktstat_ctx_list_lock);
+    return ctx;
+
+  error:
+    spin_unlock_bh(&xt_pktstat_ctx_list_lock);
+    return NULL;
+}
+
+static int pktstat_mt4_checkentry(const struct xt_mtchk_param* param)
+{
+    struct xt_pktstat_info* info = param->matchinfo;
+    struct xt_pktstat_ctx * ctx  = 0;
+
+    info->name[sizeof(info->name)-1] = '\0';
+    if (    *info->name == '\0' 
+         || *info->name == '.' 
+         || strchr(info->name, '/') != NULL) {
+        printk(KERN_ERR "xt_pktstat: illegal name\n");
+        return -EINVAL;
+    }
+    
+    pr_devel("xt_pktstat: added a rule, period:%llunsecs, samples:%u flags:0x%04x",
+             info->period, info->samples, info->flags);
+
+    // check parameters
+    if (!info->period || !info->samples) {
+        printk(KERN_ERR "xt_pkstat: invalid parameters\n");
+        return -EINVAL;
+    }
+
+    ctx = pktstat_get_xt_pktstat_ctx(info); 
+
+    if (ctx == NULL) {
+        printk(KERN_ERR "xt_pktstat: unable to acquire xt_pktstat_ctx\n");
+        return -ENOMEM;
+    }
+
+    info->ctx = ctx;
+    
+    return 0;
 }
 
 static void pktstat_mt4_destroy(const struct xt_mtdtor_param* param)
 {
     char buf[64];
     const struct xt_pktstat_info *info = param->matchinfo;
-    const struct xt_pktstat_ctx  *ctx  = info->ctx;
+          struct xt_pktstat_ctx *ctx   = info->ctx;
 
-    // release the context if necessary
+    if (ctx == NULL)
+        return;
+    
+    spin_lock_bh(&xt_pktstat_ctx_list_lock);
+    if (!atomic_dec_and_test(&ctx->ref)) {
+        spin_unlock_bh(&xt_pktstat_ctx_list_lock);
+        return;
+    }
+
+    list_del(&ctx->list);
+
+    // release the xt_pktstat_ctx if necessary
     if (ctx) {
         if (ctx->proc_dir) {
             remove_proc_entry("data",   ctx->proc_dir);
@@ -342,9 +406,7 @@ static void pktstat_mt4_destroy(const struct xt_mtdtor_param* param)
         } 
         printk(KERN_INFO "xt_pkstat[%02d]: destroying rule\n", ctx->rule_idx);
     }
-    kfree(info->ctx);
-
-
+    kfree(ctx);
 }
 
 
