@@ -16,6 +16,7 @@ static void pktstat_mt_help(void)
             "PKTSTAT v%s options:\n"
             "    --period  <msecs>\t\tSampling period.\n"
             "    --samples <number>\t\tNumber of samples to buffer.\n"
+            "    --name    <string>\t\tName to be given to the filter.\n"
             "\n", XTABLES_VERSION
          );
 }
@@ -24,6 +25,7 @@ static void pktstat_mt_help(void)
 static const struct option pktstat_mt_opts[] = {
     { .name = "samples", .has_arg = true, .val = 's' },
     { .name = "period",  .has_arg = true, .val = 'p' },
+    { .name = "name",    .has_arg = true, .val = 'n' },
     { .name = NULL }
 };
 
@@ -33,6 +35,7 @@ static void pktstat_mt_init(struct xt_entry_match *match)
     info->flags    = 0;
     info->samples  = 0;
     info->period   = 0;
+    *info->name    = '\0';
 }
 
 
@@ -49,9 +52,14 @@ static int pktstat_mt4_parse(int c, char **argv, int invert, unsigned int *flags
             break;
         /* --samples */
         case 's':
-            //info->samples = atoi(argv[optind+1]);
             info->samples = atoi(optarg);
             *flags  |= PKTSTAT_SAMPLES;
+            break;
+        /* --name */
+        case 'n':
+            strncpy(info->name, optarg, sizeof(info->name));
+            info->name[sizeof(info->name)-1] = '\0';
+            *flags  |= PKTSTAT_NAME;
             break;
         default:
             return false;
@@ -62,8 +70,14 @@ static int pktstat_mt4_parse(int c, char **argv, int invert, unsigned int *flags
 
 static void pktstat_mt_check(unsigned int flags)
 {
-    if (!(flags & PKTSTAT_PERIOD) || !(flags & PKTSTAT_SAMPLES)) {
-      xtables_error(PARAMETER_PROBLEM, "xt_pktstat: Invalid parameters.");
+    if (!(flags & PKTSTAT_PERIOD)) {
+        xtables_error(PARAMETER_PROBLEM, "xt_pktstat: missing --period parameter");
+    }
+    if (!(flags & PKTSTAT_SAMPLES)) {
+        xtables_error(PARAMETER_PROBLEM, "xt_pktstat: missing --samples parameter");
+    }
+    if (!(flags & PKTSTAT_NAME)) {
+        xtables_error(PARAMETER_PROBLEM, "xt_pktstat: missing --name parameter");
     }
 
 }
@@ -83,6 +97,10 @@ static void pktstat_mt4_print(const void *entry,
         printf("period %llu ", info->period);
     }
 
+    if (info->flags & PKTSTAT_NAME) {
+        printf("name %s ", info->name);
+    }
+
 }
 
 /* 
@@ -99,6 +117,10 @@ static void pktstat_mt4_save(const void *entry, const struct xt_entry_match *mat
 
     if (info->flags & PKTSTAT_SAMPLES) {
         printf("--samples %u", info->samples);
+    }
+
+    if (info->flags & PKTSTAT_NAME) {
+        printf("--name %s", info->name);
     }
 
 }
