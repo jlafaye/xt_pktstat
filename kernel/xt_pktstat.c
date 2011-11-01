@@ -33,18 +33,17 @@ struct iterator {
 };
 
 struct xt_pktstat_ctx {
-    struct  list_head list;
-    atomic_t ref;
+    struct list_head list;
+    atomic_t         ref;
 
-    ktime_t period;
-    ktime_t next;
-    int     rule_idx;
+    ktime_t     period;
+    ktime_t     next;
+    spinlock_t  lock;
 
     // statistics
     u_int32_t                 total_count;
     u_int32_t                 total_bytes; 
     u_int32_t                 curr_sample;
-    // spinlock_t                samples_lock;
     u_int32_t                 samples_len;
     DECLARE_KFIFO_PTR(samples, struct xt_pktstat_sample);
 
@@ -71,7 +70,7 @@ static void* pktstat_proc_seq_start(struct seq_file* s, loff_t* pos)
 {
     struct xt_pktstat_ctx* ctx = s->private;
 
-    pr_devel("xt_pktstat[%02d]: proc/start: pos=%d\n", ctx->rule_idx, (int)*pos);
+    pr_devel("xt_pktstat[%s]: proc/start: pos=%d\n", ctx->name, (int)*pos);
 
     if (*pos >= ctx->samples_len)
         return NULL;
@@ -83,7 +82,7 @@ static void* pktstat_proc_seq_next(struct seq_file* s, void* v, loff_t* pos)
 {
     struct xt_pktstat_ctx* ctx = s->private;
 
-    pr_devel("xt_pktstat[%02d]: proc/next: pos=%d\n", ctx->rule_idx, (int)*pos);
+    pr_devel("xt_pktstat[%s]: proc/next: pos=%d\n", ctx->name, (int)*pos);
 
     // we've exhausted our quota
     if (*pos >= ctx->samples_len)
@@ -105,11 +104,13 @@ static int pktstat_proc_seq_show(struct seq_file* s, void* v)
     struct xt_pktstat_sample sample;
     unsigned int res;
     
-    pr_devel("xt_pktstat[%d]: proc/show pos\n",
-             ctx->rule_idx);
+    pr_devel("xt_pktstat[%s]: proc/show pos\n",
+             ctx->name);
 
     // pop a statistics sample, if available
+    spin_lock_bh(&ctx->lock); 
     res = kfifo_out(&ctx->samples, &sample, 1);
+    spin_unlock_bh(&ctx->lock); 
 
     // empty fifo, stop iteration
     if (!res) {
@@ -195,9 +196,11 @@ static bool pktstat_mt4_match(const struct sk_buff*         skb,
         ts = ktime_get_real();
     }
 
-    pr_devel("xt_pktstat[%d] skb:%p info:%p next:%llu@%p period:%llu\n", 
-             ctx->rule_idx, skb, info, 
+    pr_devel("xt_pktstat[%s] skb:%p info:%p next:%llu@%p period:%llu\n", 
+             ctx->name, skb, info, 
              ctx->next.tv64, &ctx->next, ctx->period.tv64); 
+    
+    spin_lock_bh(&ctx->lock);
 
     // if period has changed, we need to push statistics
     if (ctx->next.tv64 < ts.tv64) {
@@ -216,14 +219,15 @@ static bool pktstat_mt4_match(const struct sk_buff*         skb,
 
         // push sample in the fifo  
         ret = kfifo_put(&ctx->samples, &sample);
+
 #ifdef DEBUG
         if (ret < 1) {
-            pr_devel("xt_pktstat[%d] unable to put sample onto the fifo: %u\n",
-                     ctx->rule_idx, ret);
+            pr_devel("xt_pktstat[%s] unable to put sample onto the fifo: %u\n",
+                     ctx->name, ret);
         } 
         else {
-            pr_devel("xt_pkstat[%d] %d samples put into the fifo",
-                     ctx->rule_idx, ret);
+            pr_devel("xt_pkstat[%s] %d samples put into the fifo",
+                     ctx->name, ret);
         }
 #endif
     }
@@ -231,8 +235,11 @@ static bool pktstat_mt4_match(const struct sk_buff*         skb,
     // update statistics
     ctx->total_count += 1;
     ctx->total_bytes += skb->len;
-    pr_devel("xt_pktstat[%d] total_count:%d total_bytes:%d\n", 
-             ctx->rule_idx, ctx->total_count, ctx->total_bytes);
+
+    spin_unlock_bh(&ctx->lock);
+
+    pr_devel("xt_pktstat[%s] total_count:%d total_bytes:%d\n", 
+             ctx->name, ctx->total_count, ctx->total_bytes);
 
     return true; 
 }
@@ -249,10 +256,14 @@ pktstat_create_xt_pktstat_ctx(const struct xt_pktstat_info* info)
     ctx = kmalloc(sizeof(*info->ctx), GFP_KERNEL);
     if (ctx == NULL)
         return NULL;
+    
+    // initialize
+    atomic_set(&ctx->ref, 1);
+    spin_lock_init(&ctx->lock);
+    strcpy(ctx->name, info->name);
+    INIT_LIST_HEAD(&ctx->list);
 
     // create procfs directory & entries
-    atomic_set(&ctx->ref, 1);
-    strcpy(ctx->name, info->name);
     ctx->proc_dir = proc_mkdir(ctx->name, proc_xt_pktstat);
     if (ctx->proc_dir == NULL)
         goto error;
@@ -273,7 +284,7 @@ pktstat_create_xt_pktstat_ctx(const struct xt_pktstat_info* info)
     if (ctx->proc_entry_conf == NULL) 
         goto error;
     ctx->proc_entry_conf->read_proc = pktstat_proc_read_conf;
-    ctx->proc_entry_conf->data      = info;
+    ctx->proc_entry_conf->data      = (void*)info;
 
     // allocate and initialize counters
     if (kfifo_alloc(&ctx->samples, info->samples, GFP_KERNEL))
@@ -301,9 +312,9 @@ pktstat_create_xt_pktstat_ctx(const struct xt_pktstat_info* info)
 
         // pktstat_dbg = (unsigned long long*)&ctx->next;
         // DEBUG_TS;
-    printk(KERN_INFO "xt_pktstat[%02d]: added a rule, "
+    printk(KERN_INFO "xt_pktstat[%s]: added a rule, "
                     "period:%llunsecs, samples:%u flags:0x%04x\n", 
-                    ctx->rule_idx, info->period, info->samples, info->flags);
+                    ctx->name, info->period, info->samples, info->flags);
     return ctx;
 
   error:
@@ -381,7 +392,6 @@ static int pktstat_mt4_checkentry(const struct xt_mtchk_param* param)
 
 static void pktstat_mt4_destroy(const struct xt_mtdtor_param* param)
 {
-    char buf[64];
     const struct xt_pktstat_info *info = param->matchinfo;
           struct xt_pktstat_ctx *ctx   = info->ctx;
 
@@ -401,10 +411,9 @@ static void pktstat_mt4_destroy(const struct xt_mtdtor_param* param)
         if (ctx->proc_dir) {
             remove_proc_entry("data",   ctx->proc_dir);
             remove_proc_entry("config", ctx->proc_dir);
-            snprintf(buf, sizeof(buf), "%d", ctx->rule_idx);
-            remove_proc_entry(buf, proc_xt_pktstat);
+            remove_proc_entry(ctx->name, proc_xt_pktstat);
         } 
-        printk(KERN_INFO "xt_pkstat[%02d]: destroying rule\n", ctx->rule_idx);
+        printk(KERN_INFO "xt_pkstat[%s]: destroying rule\n", ctx->name);
     }
     kfree(ctx);
 }
