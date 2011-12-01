@@ -15,12 +15,21 @@
 #include <linux/errno.h>
 #include <linux/spinlock.h>
 #include <linux/ktime.h>
+#ifndef RHEL5
 #include <linux/kfifo.h>
+#endif
 #include <linux/seq_file.h>
 #include <linux/version.h>
+#ifndef RHEL5
 #include <net/net_namespace.h>
+#endif
 #include <linux/netfilter/x_tables.h>
 #include <linux/netfilter/xt_pktstat.h>
+
+#ifdef RHEL5
+#include "compat_rhel5.h"
+#endif
+
 
 struct xt_pktstat_sample {
     ktime_t     tstamp;
@@ -180,7 +189,6 @@ static int pktstat_proc_read_conf(char *page, char **start, off_t offset,
     return pos;
 }
 
-
 static bool pktstat_mt4_match(const struct sk_buff*         skb, 
                                     struct xt_action_param* param)
 {
@@ -191,13 +199,14 @@ static bool pktstat_mt4_match(const struct sk_buff*         skb,
     struct xt_pktstat_sample sample;
     
     // get timestamp if no timestamp
-    ts = skb->tstamp;
+    ts = skb_tstamp(skb);
     if (ts.tv64 == 0) {
         ts = ktime_get_real();
     }
 
-    pr_devel("xt_pktstat[%s] skb:%p info:%p next:%llu@%p period:%llu\n", 
+    pr_devel("xt_pktstat[%s] skb:%p info:%p curr:%llu next:%llu@%p period:%llu\n", 
              ctx->name, skb, info, 
+             ts.tv64,
              ctx->next.tv64, &ctx->next, ctx->period.tv64); 
     
     spin_lock_bh(&ctx->lock);
@@ -245,17 +254,15 @@ static bool pktstat_mt4_match(const struct sk_buff*         skb,
 }
 
 static struct xt_pktstat_ctx *
-pktstat_create_xt_pktstat_ctx(const struct xt_pktstat_info* info)
+pktstat_init_xt_pktstat_ctx(const struct xt_pktstat_info *info,
+                                  struct xt_pktstat_ctx  *ctx)
 {
-    struct xt_pktstat_ctx *ctx;
+    //struct xt_pktstat_ctx *ctx;
     ktime_t now;
     uint64_t now64;
 
     // allocate and initialize xt_pktstat_ctx
-    pr_devel(KERN_DEBUG "xt_pkstat: allocating a xt_pktstat_ctx of size %d\n", sizeof(*info->ctx));
-    ctx = kmalloc(sizeof(*info->ctx), GFP_KERNEL);
-    if (ctx == NULL)
-        return NULL;
+    pr_devel(KERN_DEBUG "xt_pkstat: initializing a xt_pktstat_ctx of size %d\n", sizeof(*info->ctx));
     
     // initialize
     atomic_set(&ctx->ref, 1);
@@ -333,27 +340,32 @@ pktstat_create_xt_pktstat_ctx(const struct xt_pktstat_info* info)
 static struct xt_pktstat_ctx *
 pktstat_get_xt_pktstat_ctx(const struct xt_pktstat_info* info)
 {
+    // we defensively allocate memory context outside the critical 
+    // section to avoid sleeping with a spinlock held
     struct xt_pktstat_ctx *ctx;
+    struct xt_pktstat_ctx *tmp = kmalloc(sizeof(*info->ctx), GFP_KERNEL);
+    if (tmp == NULL)
+        return NULL;
 
     spin_lock_bh(&xt_pktstat_ctx_list_lock);
     list_for_each_entry(ctx, &xt_pktstat_ctx_list, list)
         if (strcmp(ctx->name, info->name) == 0) {
             atomic_inc(&ctx->ref);
             spin_unlock_bh(&xt_pktstat_ctx_list_lock);
+            kfree(tmp);
             return ctx;
         }
 
-    ctx = pktstat_create_xt_pktstat_ctx(info);
-    if (ctx == NULL)
-        goto error;
+    ctx = pktstat_init_xt_pktstat_ctx(info, tmp);
 
     list_add_tail(&ctx->list, &xt_pktstat_ctx_list);
     spin_unlock_bh(&xt_pktstat_ctx_list_lock);
     return ctx;
 
+/*
   error:
     spin_unlock_bh(&xt_pktstat_ctx_list_lock);
-    return NULL;
+    return NULL;*/
 }
 
 static int pktstat_mt4_checkentry(const struct xt_mtchk_param* param)
@@ -378,7 +390,11 @@ static int pktstat_mt4_checkentry(const struct xt_mtchk_param* param)
         return -EINVAL;
     }
 
+    printk(KERN_INFO "xt_pktstat: creating context\n");
+
     ctx = pktstat_get_xt_pktstat_ctx(info); 
+
+    printk(KERN_INFO "xt_pktstat: context created; %p\n", ctx);
 
     if (ctx == NULL) {
         printk(KERN_ERR "xt_pktstat: unable to acquire xt_pktstat_ctx\n");
@@ -405,6 +421,7 @@ static void pktstat_mt4_destroy(const struct xt_mtdtor_param* param)
     }
 
     list_del(&ctx->list);
+    spin_unlock_bh(&xt_pktstat_ctx_list_lock);
 
     // release the xt_pktstat_ctx if necessary
     if (ctx) {
@@ -432,7 +449,7 @@ static struct xt_match pktstat_mt4_reg = {
 
 static int __init init(void)
 {
-    proc_xt_pktstat = proc_mkdir("xt_pktstat", init_net.proc_net);
+    proc_xt_pktstat = proc_mkdir("xt_pktstat", init_net__proc_net);
     if (proc_xt_pktstat == NULL) {
         printk(KERN_ERR "xt_pkstat: unable to create procfs entry\n");
         return ENOENT;
@@ -444,7 +461,7 @@ static int __init init(void)
 
 static void __exit fini(void)
 {
-    remove_proc_entry("xt_pktstat", init_net.proc_net);
+    remove_proc_entry("xt_pktstat", init_net__proc_net);
     printk(KERN_INFO "xt_pktstat: exit!\n");
     return xt_unregister_match(&pktstat_mt4_reg);
 }

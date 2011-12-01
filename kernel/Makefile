@@ -1,4 +1,10 @@
 obj-m := xt_pktstat.o
+xt_pktstat-objs := pktstat.o
+#obj-y := 
+ifeq ($(DISTRO),RHEL5)
+xt_pktstat-objs += kfifo.o compat.o
+EXTRA_CFLAGS += -DRHEL5
+endif
 MODULES_DIR := /lib/modules/$(shell uname -r)
 KERNEL_DIR := ${MODULES_DIR}/build
 EXTRA_CFLAGS += -I$(PWD)/include
